@@ -1,0 +1,50 @@
+% Sinh tu dong boi analyze_wt04.py -- can \usepackage{booktabs,amsmath,graphicx}
+
+\begin{table}[htbp]
+\centering\small
+\caption{Giá trị xác lập trung bình trong pha chạy đều}
+\label{tab:wt04_steady}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrrr}
+\toprule
+Kịch bản & $v_{\text{lệnh}}$ & $v_{\text{odom}}$ & $v_{\text{wheel}}$ & $v_{\text{GT}}$ & $\omega_{\text{lệnh}}$ & $\omega_{\text{odom}}$ & $\omega_{\text{IMU}}$ & $\omega_{\text{GT}}$ \\
+\midrule
+wt04_arc_sphere & +0.500 & +0.500 & +0.500 & +0.502 & +1.000 & +0.998 & +1.003 & +1.011 \\
+wt04_rotate_left_sphere & 0.000 & 0.000 & 0.000 & +0.002 & +1.000 & +0.999 & +1.014 & +1.014 \\
+\bottomrule
+\end{tabular}}
+\par\smallskip\footnotesize $v$ (m/s), $\omega$ (rad/s). GT = ground truth (plugin p3d).
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\caption{Sai số odometry so với ground truth}
+\label{tab:wt04_error}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Kịch bản & Quãng đường & $\Delta\theta_{\text{GT}}$ & $e_{\text{pos}}$ cuối & $e_{\text{pos}}$ max & $e_{\theta}$ cuối & RMS $\omega_{\text{odom}}-\omega_{\text{IMU}}$ & max $\lVert$wheel$-$odom$\rVert$ \\
+ & (m) & (độ) & (mm) & (mm) & (độ) & (rad/s) & (mm) \\
+\midrule
+wt04_arc_sphere & 3.413 & +393.4 & 26.1 & 26.1 & -2.92 & 0.0088 & 0.09 \\
+wt04_rotate_left_sphere & 0.003 & +364.4 & 1.8 & 1.8 & -3.49 & 0.0200 & 0.00 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\caption{Gia tốc đo bởi IMU so với gia tốc suy ra từ ground truth}
+\label{tab:wt04_imu}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Kịch bản & $a_x$ tăng tốc & $a_x$ phanh & $a_y$ đầu pha & $a_y$ xác lập & $v\omega$ (GT) & $\bar a_z$ & $\sigma_{\omega_z}$ đứng yên \\
+ & IMU / GT & IMU / GT & IMU / GT & IMU / GT & (m/s$^2$) & (m/s$^2$) & (rad/s) \\
+\midrule
+wt04_arc_sphere & +0.81 / +0.77 & -0.79 / -0.75 & +0.47 / +0.46 & +0.51 / +0.51 & +0.51 & 9.80 & 0.0036 \\
+wt04_rotate_left_sphere & 0.00 / +0.01 & 0.00 / 0.00 & -0.01 / +0.02 & 0.00 / 0.00 & 0.00 & 9.80 & 0.0017 \\
+\bottomrule
+\end{tabular}}
+\par\smallskip\footnotesize Giá trị tăng tốc/phanh/đầu pha là trung bình trong pha có $|a_{\text{GT}}| > 50\%$ đỉnh.
+\end{table}

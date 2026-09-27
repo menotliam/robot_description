@@ -1,0 +1,62 @@
+% Sinh tu dong boi analyze_wt04.py -- can \usepackage{booktabs,amsmath,graphicx}
+
+\begin{table}[htbp]
+\centering\small
+\caption{Giá trị xác lập trung bình trong pha chạy đều}
+\label{tab:wt04_steady}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrrr}
+\toprule
+Kịch bản & $v_{\text{lệnh}}$ & $v_{\text{odom}}$ & $v_{\text{wheel}}$ & $v_{\text{GT}}$ & $\omega_{\text{lệnh}}$ & $\omega_{\text{odom}}$ & $\omega_{\text{IMU}}$ & $\omega_{\text{GT}}$ \\
+\midrule
+S0 Xoay trái (URDF cũ) & 0.000 & +0.001 & 0.000 & +0.001 & +1.000 & +1.000 & +0.921 & +0.921 \\
+S1 Tiến & +0.500 & +0.500 & +0.500 & +0.501 & 0.000 & 0.000 & +0.003 & +0.003 \\
+S2 Lùi & -0.500 & +0.500 & -0.500 & -0.496 & 0.000 & 0.000 & +0.007 & +0.007 \\
+S3 Xoay trái & 0.000 & +0.001 & 0.000 & -0.001 & +1.000 & +1.000 & +0.921 & +0.921 \\
+S4 Xoay phải & 0.000 & +0.001 & 0.000 & -0.001 & -1.000 & -1.000 & -0.921 & -0.921 \\
+S5 Cung tròn & +0.500 & +0.500 & +0.500 & +0.500 & +1.000 & +0.999 & +0.921 & +0.921 \\
+\bottomrule
+\end{tabular}}
+\par\smallskip\footnotesize $v$ (m/s), $\omega$ (rad/s). GT = ground truth (plugin p3d).
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\caption{Sai số odometry so với ground truth}
+\label{tab:wt04_error}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Kịch bản & Quãng đường & $\Delta\theta_{\text{GT}}$ & $e_{\text{pos}}$ cuối & $e_{\text{pos}}$ max & $e_{\theta}$ cuối & RMS $\omega_{\text{odom}}-\omega_{\text{IMU}}$ & max $\lVert$wheel$-$odom$\rVert$ \\
+ & (m) & (độ) & (mm) & (mm) & (độ) & (rad/s) & (mm) \\
+\midrule
+S0 Xoay trái (URDF cũ) & 0.606 & +328.4 & 58.8 & 176.8 & +30.09 & 0.0753 & 0.63 \\
+S1 Tiến & 1.662 & -0.1 & 37.5 & 37.5 & -0.01 & 0.0044 & 0.50 \\
+S2 Lùi & 2.113 & +1.8 & 39.5 & 39.5 & -1.81 & 0.0084 & 2.57 \\
+S3 Xoay trái & 0.004 & +359.3 & 4.4 & 4.5 & +30.36 & 0.0758 & 0.01 \\
+S4 Xoay phải & 0.001 & -363.5 & 0.9 & 0.9 & -30.72 & 0.0758 & 0.01 \\
+S5 Cung tròn & 3.604 & +380.6 & 256.9 & 261.7 & +31.61 & 0.0762 & 0.84 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\caption{Gia tốc đo bởi IMU so với gia tốc suy ra từ ground truth}
+\label{tab:wt04_imu}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Kịch bản & $a_x$ tăng tốc & $a_x$ phanh & $a_y$ đầu pha & $a_y$ xác lập & $v\omega$ (GT) & $\bar a_z$ & $\sigma_{\omega_z}$ đứng yên \\
+ & IMU / GT & IMU / GT & IMU / GT & IMU / GT & (m/s$^2$) & (m/s$^2$) & (rad/s) \\
+\midrule
+S0 Xoay trái (URDF cũ) & -0.08 / -0.08 & -0.09 / -0.04 & +0.54 / +0.42 & 0.00 / 0.00 & 0.00 & 9.80 & 0.0054 \\
+S1 Tiến & +0.99 / +0.93 & -1.01 / -0.93 & 0.00 / -0.01 & 0.00 / 0.00 & 0.00 & 9.80 & 0.0054 \\
+S2 Lùi & -1.00 / -0.93 & +0.99 / +0.93 & 0.00 / 0.00 & 0.00 / 0.00 & 0.00 & 9.80 & 0.0063 \\
+S3 Xoay trái & 0.00 / -0.01 & 0.00 / 0.00 & +0.01 / +0.01 & 0.00 / 0.00 & 0.00 & 9.80 & 0.0063 \\
+S4 Xoay phải & 0.00 / 0.00 & 0.00 / +0.01 & 0.00 / 0.00 & 0.00 / 0.00 & 0.00 & 9.80 & 0.0003 \\
+S5 Cung tròn & +0.82 / +0.80 & -0.92 / -0.88 & +0.43 / +0.42 & +0.46 / +0.46 & +0.46 & 9.80 & 0.0063 \\
+\bottomrule
+\end{tabular}}
+\par\smallskip\footnotesize Giá trị tăng tốc/phanh/đầu pha là trung bình trong pha có $|a_{\text{GT}}| > 50\%$ đỉnh.
+\end{table}
