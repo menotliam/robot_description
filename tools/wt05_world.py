@@ -56,6 +56,13 @@ SHAPES = [
 # Duong chay goi y (diem re), vong nguoc chieu kim dong ho, khep kin ve S
 ROUTE = [(0.0, -1.8), (2.45, -1.8), (2.45, 1.3), (-2.75, 1.3), (-2.75, -1.8), (0.0, -1.8)]
 
+# Vat "mover" cho thi nghiem moi truong dong (bao cao 05.2). KHONG thuoc SHAPES: ban do
+# chuan cua compare_map van la phong tinh. Hop 0,5 x 0,5 m, cao 0,5 m (cat mat phang quet
+# 0,17 m). P1: dai bac giua stub va box_ne, cach duong chay 0,75 m. P2: dai nam, vung
+# trong da duoc quet o vong dau. route_driver.py dung dung cac gia tri nay (tham so mac dinh).
+MOVER = dict(name='mover', size=0.5, height=0.5, material='Gazebo/Purple',
+             P1=(1.2, 2.3), P2=(-1.5, -2.5))
+
 
 # ------------------------------------------------------------ hinh hoc --
 
@@ -214,8 +221,15 @@ def _model_sdf(name, kind, p, h, mat):
 '''
 
 
-def world_sdf():
-    models = ''.join(_model_sdf(*s) for s in SHAPES)
+def mover_shape(at='P1'):
+    m = MOVER
+    x, y = m[at]
+    return (m['name'], 'box', (x, y, m['size'], m['size'], 0.0), m['height'], m['material'])
+
+
+def world_sdf(with_mover=False):
+    shapes = list(SHAPES) + ([mover_shape('P1')] if with_mover else [])
+    models = ''.join(_model_sdf(*s) for s in shapes)
     return f'''<?xml version="1.0"?>
 <!-- SINH TU DONG boi tools/wt05_world.py - sua SHAPES trong script roi chay lai, khong sua tay. -->
 <sdf version="1.6">
@@ -251,10 +265,12 @@ def world_sdf():
 
 
 def main():
-    out = Path(__file__).resolve().parent.parent / 'worlds' / 'wt05_room.world'
-    out.parent.mkdir(exist_ok=True)
-    out.write_text(world_sdf())
-    print(f'Da ghi {out} ({len(SHAPES)} vat the)')
+    wdir = Path(__file__).resolve().parent.parent / 'worlds'
+    wdir.mkdir(exist_ok=True)
+    (wdir / 'wt05_room.world').write_text(world_sdf())
+    (wdir / 'wt05_room_mover.world').write_text(world_sdf(with_mover=True))
+    print(f'Da ghi {wdir}/wt05_room.world ({len(SHAPES)} vat the) va '
+          f'wt05_room_mover.world (+ mover tai P1 {MOVER["P1"]})')
 
 
 if __name__ == '__main__':

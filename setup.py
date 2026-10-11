@@ -32,7 +32,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-              'diff_drive_odometry = robot_description.diff_drive_odometry:main'
+              'diff_drive_odometry = robot_description.diff_drive_odometry:main',
+              'route_driver = robot_description.route_driver:main',
         ],
     },
 )
