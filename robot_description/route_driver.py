@@ -194,6 +194,7 @@ def main(args=None):
             self.t_last = None
             self.futures = []
             self.change_steps = []
+            self.spawn_name = ''
             self.create_timer(0.02, self.tick)
             self.get_logger().info(
                 f'route_driver: v_max={self.v_max} w_max={self.w_max} laps={self.laps} '
@@ -241,14 +242,17 @@ def main(args=None):
                 kind, arg = self.change_steps.pop(0)
                 res = self.futures[0].result()
                 ok = bool(getattr(res, 'success', False))
+                msg = str(getattr(res, 'status_message', ''))
                 if kind == 'delete':
                     self.emit(event='remove', obj=m['name'], ox=m['p1'][0], oy=m['p1'][1],
-                              size=m['size'], ok=ok)
+                              size=m['size'], ok=ok, msg=msg)
                 else:
-                    self.emit(event='spawn', obj=m['name'], ox=arg[0], oy=arg[1],
-                              size=m['size'], ok=ok)
+                    self.emit(event='spawn', obj=self.spawn_name, ox=arg[0], oy=arg[1],
+                              size=m['size'], ok=ok, msg=msg)
                 if not ok:
-                    self.get_logger().error(f'{kind} that bai: {getattr(res, "status_message", "")}')
+                    self.get_logger().error(f'{kind} THAT BAI: {msg}')
+                else:
+                    self.get_logger().info(f'{kind}: {msg}')
                 self.futures = []
                 if not self.change_steps:
                     self.set_phase('RESUME_WAIT')
@@ -263,14 +267,18 @@ def main(args=None):
             else:
                 if not self.spawn_cli.service_is_ready():
                     return
+                # Ten MOI cho vat o P2: Gazebo Classic co the bo qua/khong hien thi mot model
+                # tao lai dung ten cua model vua xoa.
+                self.spawn_name = f"{m['name']}_p2"
                 req = SpawnEntity.Request()
-                req.name = m['name']
-                req.xml = mover_sdf(m['name'], m['size'], m['height'], m['material'])
+                req.name = self.spawn_name
+                req.xml = mover_sdf(self.spawn_name, m['size'], m['height'], m['material'])
                 pose = Pose()
                 pose.position.x, pose.position.y = float(arg[0]), float(arg[1])
                 pose.position.z = m['height'] / 2.0
+                pose.orientation.w = 1.0
                 req.initial_pose = pose
-                req.reference_frame = 'world'
+                req.reference_frame = ''
                 self.futures = [self.spawn_cli.call_async(req)]
 
         # ------------------------------------------------------------ vong lap
