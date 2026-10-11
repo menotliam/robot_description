@@ -1,0 +1,80 @@
+# Cau hinh slam_toolbox - che do online asynchronous (PSE_ROS_WT_05)
+#
+# Goc: /opt/ros/humble/share/slam_toolbox/config/mapper_params_online_async.yaml
+# Chi cac dong danh dau [WT05] khac mac dinh; ly do ghi ngay ben canh.
+#
+# "online"  : xay ban do trong luc robot dang chay (khong phai tu file bag sau do).
+# "async"   : chi xu ly scan MOI NHAT khi bo giai ranh; scan den luc dang ban bi bo qua.
+#             -> khong bao gio tre dan theo thoi gian thuc, doi lai co the bo sot scan.
+#             (sync: xep hang moi scan, khong bo sot nhung co the tre neu may yeu.)
+slam_toolbox:
+  ros__parameters:
+
+    # --- Bo giai pose graph (Ceres) ---
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # --- Frame va topic ---
+    odom_frame: odom
+    map_frame: map
+    # Robot nay theo REP 105: odom -> base_footprint -> base_link (plugin diff_drive
+    # phat odom -> base_footprint). base_link chi cach base_footprint mot TF tinh.
+    base_frame: base_footprint
+    scan_topic: /scan
+    use_map_saver: true
+    mode: mapping
+
+    debug_logging: false
+    throttle_scans: 1
+    transform_publish_period: 0.02      # phat TF map -> odom 50 Hz
+    map_update_interval: 1.0            # [WT05] mac dinh 5.0 s -> 1 s de thay /map lon dan "thoi gian thuc" tren RViz
+    resolution: 0.05                    # 5 cm/o
+    min_laser_range: 0.12               # [WT05] mac dinh 0.0 -> bang range.min cua cam bien
+    max_laser_range: 12.0               # [WT05] mac dinh 20.0 -> bang range.max cua cam bien
+    minimum_time_interval: 0.5
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+    stack_size_to_use: 40000000
+    enable_interactive_mode: true
+
+    # --- Khi nao mot scan duoc them thanh mot nut moi cua pose graph ---
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.3        # [WT05] mac dinh 0.5 m: phong 8x6 m, robot chay cham -> them nut day hon
+    minimum_travel_heading: 0.3         # [WT05] mac dinh 0.5 rad (~29 do) -> 0.3 rad (~17 do)
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+
+    # --- Loop closure ---
+    do_loop_closing: true
+    loop_search_maximum_distance: 3.0   # chi tim nut cu trong ban kinh 3 m quanh vi tri hien tai
+    loop_match_minimum_chain_size: 10   # can >= 10 nut cu lien tiep gan day moi thu khop
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+
+    # --- Scan matching (nut ke tiep) ---
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    # --- Scan matching (loop closure) ---
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    # --- Phat sai lech so voi du doan cua odometry ---
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349
+    coarse_angle_resolution: 0.0349
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true
