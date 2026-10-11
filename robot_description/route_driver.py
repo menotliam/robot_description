@@ -15,6 +15,11 @@ Kich ban moi truong dong (scenario):
   none   : khong lam gi
   remove : sau vong `change_after_lap`, xoa vat 'mover'
   move   : sau vong `change_after_lap`, xoa 'mover' o P1 roi tao lai o P2
+  moving : (kich ban C) tu luc robot xuat phat, 'mover' chay qua lai LIEN TUC tren lan
+           mover_lane = [ax, ay, bx, by] voi toc do mover_speed; sau vong `change_after_lap`
+           thi dung va xoa vat. Vat duoc doi bang dich vu /set_entity_state (plugin
+           gazebo_ros_state trong wt05_room_mover.world) mover_rate lan/giay; vi tri da dat
+           phat len /exp/mover (geometry_msgs/PoseStamped, frame world) de ghi vao bag.
 Moi su kien phat len /exp/event (std_msgs/String, JSON co thoi gian mo phong) de ghi vao bag.
 
 Chay (thuong do experiment.launch.py goi):
@@ -132,6 +137,33 @@ class RouteFollower:
         return self.v, self.w, events
 
 
+class LaneMotion:
+    """Vat chay qua lai (ping-pong) tren doan thang A-B voi toc do khong doi.
+
+    Bat dau tai diem gan `start` nhat tren doan (mac dinh: trung diem), di ve phia B truoc.
+    pos(t) chi phu thuoc thoi gian ke tu luc bat dau -> vi tri xac dinh, lap lai duoc.
+    """
+
+    def __init__(self, a, b, speed, start=None):
+        self.a, self.b, self.speed = tuple(a), tuple(b), float(speed)
+        self.L = math.hypot(b[0] - a[0], b[1] - a[1])
+        if self.L < 1e-6:
+            raise ValueError('mover_lane: A va B trung nhau')
+        if start is None:
+            self.s0 = self.L / 2
+        else:
+            ux, uy = (b[0] - a[0]) / self.L, (b[1] - a[1]) / self.L
+            self.s0 = min(self.L, max(0.0, (start[0] - a[0]) * ux + (start[1] - a[1]) * uy))
+
+    def s(self, dt):
+        u = (self.s0 + self.speed * max(0.0, dt)) % (2 * self.L)
+        return u if u <= self.L else 2 * self.L - u
+
+    def pos(self, dt):
+        k = self.s(dt) / self.L
+        return (self.a[0] + (self.b[0] - self.a[0]) * k, self.a[1] + (self.b[1] - self.a[1]) * k)
+
+
 # ---------------------------------------------------------------- ROS node --
 
 def mover_sdf(name, size, height, material):
@@ -149,10 +181,10 @@ def mover_sdf(name, size, height, material):
 def main(args=None):
     import rclpy
     from rclpy.node import Node
-    from geometry_msgs.msg import Twist, Pose
+    from geometry_msgs.msg import Twist, Pose, PoseStamped
     from nav_msgs.msg import Odometry
     from std_msgs.msg import String
-    from gazebo_msgs.srv import DeleteEntity, SpawnEntity
+    from gazebo_msgs.srv import DeleteEntity, SetEntityState, SpawnEntity
     from tf2_ros import Buffer, TransformListener
 
     class RouteDriver(Node):
@@ -173,8 +205,16 @@ def main(args=None):
                               material=p('mover_material', 'Gazebo/Purple').value,
                               p1=list(p('mover_p1', [1.2, 2.3]).value),
                               p2=list(p('mover_p2', [-1.5, -2.5]).value))
-            if self.scenario not in ('none', 'remove', 'move'):
+            if self.scenario not in ('none', 'remove', 'move', 'moving'):
                 raise ValueError(f'scenario khong hop le: {self.scenario}')
+            # Kich ban C: lan chay cua vat (world, m) va toc do; mac dinh lan dai 2 m o dai bac,
+            # trung diem dung bang P1 (vi tri vat trong world) -> khong bi giat luc bat dau.
+            lane = [float(v) for v in p('mover_lane', [0.2, 2.3, 2.2, 2.3]).value]
+            if len(lane) != 4:
+                raise ValueError('mover_lane can 4 so: ax, ay, bx, by')
+            self.lane = LaneMotion(lane[:2], lane[2:], p('mover_speed', 0.5).value,
+                                   start=self.mover['p1'])
+            self.mover_period = 1.0 / max(1.0, p('mover_rate', 20.0).value)
 
             hold = self.change_after_lap if self.scenario != 'none' else None
             self.f = RouteFollower(laps=self.laps, overshoot=self.overshoot, v_max=self.v_max,
@@ -186,6 +226,15 @@ def main(args=None):
             self.tf_lis = TransformListener(self.tf_buf, self)
             self.del_cli = self.create_client(DeleteEntity, 'delete_entity')
             self.spawn_cli = self.create_client(SpawnEntity, 'spawn_entity')
+            self.state_cli = self.create_client(SetEntityState, 'set_entity_state')
+            self.mover_pub = self.create_publisher(PoseStamped, 'exp/mover', 50)
+            self.moving = False          # kich ban C: dang doi vat?
+            self.t_move0 = None
+            self.t_next_tp = None        # lich doi vat (thoi gian mo phong)
+            self.tp_future = None
+            self.tp_sent = self.tp_fail = 0
+            self.mover_xy = tuple(self.mover['p1'])
+            self.t_warn = -1e9
 
             self.pose = None
             self.finished = False
@@ -199,6 +248,11 @@ def main(args=None):
             self.get_logger().info(
                 f'route_driver: v_max={self.v_max} w_max={self.w_max} laps={self.laps} '
                 f'scenario={self.scenario} overshoot={self.overshoot} idle_after={self.idle_after}')
+            if self.scenario == 'moving':
+                self.get_logger().info(
+                    f'kich ban C: vat chay qua lai {self.lane.a} <-> {self.lane.b} '
+                    f'({self.lane.L:.2f} m) v={self.lane.speed} m/s, {1 / self.mover_period:.0f} lan/s, '
+                    f'dung + xoa sau vong {self.change_after_lap}')
 
         # ------------------------------------------------------------ tien ich
         def now(self):
@@ -225,9 +279,47 @@ def main(args=None):
         def set_phase(self, ph):
             self.phase, self.t_phase = ph, self.now()
 
+        # ------------------------------------------------------------ kich ban C
+        def teleport(self, now):
+            """Dời vat toi vi tri cua lan tai thoi diem now. Goi khong chan; theo lich co dinh
+            mover_rate lan/s (tre 1 nhip timer thi bu o nhip sau), bo qua neu lan goi truoc chua xong."""
+            if self.t_next_tp is not None and now < self.t_next_tp - 1e-6:
+                return
+            if self.tp_future is not None:
+                if not self.tp_future.done():
+                    return
+                res = self.tp_future.result()
+                if res is None or not res.success:
+                    self.tp_fail += 1
+                    if self.tp_fail in (1, 10, 100):
+                        self.get_logger().error(f'set_entity_state THAT BAI (lan {self.tp_fail})')
+                self.tp_future = None
+            x, y = self.lane.pos(now - self.t_move0)
+            req = SetEntityState.Request()
+            req.state.name = self.mover['name']
+            req.state.pose.position.x, req.state.pose.position.y = float(x), float(y)
+            req.state.pose.position.z = self.mover['height'] / 2.0
+            req.state.pose.orientation.w = 1.0
+            req.state.reference_frame = 'world'
+            self.tp_future = self.state_cli.call_async(req)
+            if self.t_next_tp is None or now - self.t_next_tp > 2 * self.mover_period:
+                self.t_next_tp = now               # lan dau, hoac bi tre qua nhieu -> dat lai lich
+            self.t_next_tp += self.mover_period
+            self.tp_sent += 1
+            self.mover_xy = (x, y)
+            ps = PoseStamped()
+            ps.header.stamp = self.get_clock().now().to_msg()
+            ps.header.frame_id = 'world'
+            ps.pose = req.state.pose
+            self.mover_pub.publish(ps)
+
         # ------------------------------------------------------------ kich ban
         def start_change(self):
             m = self.mover
+            if self.moving:              # kich ban C: dung doi vat truoc khi xoa
+                self.moving = False
+                self.emit(event='move_stop', obj=m['name'], ox=round(self.mover_xy[0], 4),
+                          oy=round(self.mover_xy[1], 4), sent=self.tp_sent, failed=self.tp_fail)
             self.change_steps = [('delete', None)]
             if self.scenario == 'move':
                 self.change_steps.append(('spawn', m['p2']))
@@ -244,7 +336,8 @@ def main(args=None):
                 ok = bool(getattr(res, 'success', False))
                 msg = str(getattr(res, 'status_message', ''))
                 if kind == 'delete':
-                    self.emit(event='remove', obj=m['name'], ox=m['p1'][0], oy=m['p1'][1],
+                    ox, oy = self.mover_xy if self.scenario == 'moving' else m['p1']
+                    self.emit(event='remove', obj=m['name'], ox=round(ox, 4), oy=round(oy, 4),
                               size=m['size'], ok=ok, msg=msg)
                 else:
                     self.emit(event='spawn', obj=self.spawn_name, ox=arg[0], oy=arg[1],
@@ -261,6 +354,8 @@ def main(args=None):
             if kind == 'delete':
                 if not self.del_cli.service_is_ready():
                     return
+                if self.tp_future is not None and not self.tp_future.done():
+                    return               # cho lan doi cuoi cung xong roi moi xoa
                 req = DeleteEntity.Request()
                 req.name = m['name']
                 self.futures = [self.del_cli.call_async(req)]
@@ -284,9 +379,18 @@ def main(args=None):
         # ------------------------------------------------------------ vong lap
         def tick(self):
             now = self.now()
+            if self.moving:
+                self.teleport(now)
             if self.phase == 'WAIT':
                 ready = self.pose is not None and self.tf_buf.can_transform(
                     'map', 'odom', rclpy.time.Time())
+                if ready and self.scenario == 'moving' and not self.state_cli.service_is_ready():
+                    ready = False
+                    if now - self.t_warn > 5.0:
+                        self.t_warn = now
+                        self.get_logger().warn(
+                            'Chua co dich vu /set_entity_state -> world chua nap plugin '
+                            'gazebo_ros_state? (can wt05_room_mover.world moi, xem tools/wt05_world.py)')
                 if ready:
                     self.set_phase('SETTLE')
                     self.get_logger().info('Da co ground truth va TF map->odom; dung yen '
@@ -296,6 +400,14 @@ def main(args=None):
                 if now - self.t_phase >= self.wait_start:
                     self.emit(event='start', v_max=self.v_max, w_max=self.w_max, laps=self.laps,
                               scenario=self.scenario)
+                    if self.scenario == 'moving':
+                        self.moving, self.t_move0 = True, now
+                        self.emit(event='move_start', obj=self.mover['name'], ax=self.lane.a[0],
+                                  ay=self.lane.a[1], bx=self.lane.b[0], by=self.lane.b[1],
+                                  speed=self.lane.speed, s0=round(self.lane.s0, 4),
+                                  size=self.mover['size'], rate=round(1 / self.mover_period, 1),
+                                  stop_after_lap=self.change_after_lap)
+                        self.teleport(now)
                     self.t_last = now
                     self.set_phase('RUN')
                 return

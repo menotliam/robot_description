@@ -11,9 +11,13 @@ Lam lan luot:
      ros2 bag nhan SIGINT va ghi metadata day du.
 Voi driver:=false (lai tay bang teleop), bam Ctrl+C khi xong.
 
-Doi so: run, v, w, laps, overshoot, idle_after, scenario (none|remove|move), change_after_lap,
-        wheel_collision (sphere|cylinder), driver, gui, rviz, bag_dir.
-scenario khac none tu dung world wt05_room_mover.world (co vat 'mover' tai P1).
+Doi so: run, v, w, laps, overshoot, idle_after, scenario (none|remove|move|moving), change_after_lap,
+        mover_speed, mover_lane, wheel_collision (sphere|cylinder), driver, gui, rviz, bag_dir.
+scenario khac none tu dung world wt05_room_mover.world (co vat 'mover' tai P1 va plugin
+gazebo_ros_state cho dich vu /set_entity_state).
+Kich ban C (vat chay qua lai lien tuc, dung + xoa sau vong change_after_lap):
+    ros2 launch robot_description experiment.launch.py run:=e3c_m4 scenario:=moving \
+        laps:=12 change_after_lap:=4 mover_speed:=0.5
 """
 
 import os
@@ -29,8 +33,10 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+# /pose: slam_toolbox phat MOT lan cho moi scan duoc nhan lam nut (dau thoi gian = scan do).
+# /exp/mover: vi tri vat o kich ban C.
 TOPICS = ['/scan', '/tf', '/tf_static', '/odom', '/ground_truth', '/map',
-          '/slam_toolbox/graph_visualization', '/cmd_vel', '/exp/event']
+          '/slam_toolbox/graph_visualization', '/pose', '/cmd_vel', '/exp/event', '/exp/mover']
 
 
 def _setup(context):
@@ -75,7 +81,9 @@ def _setup(context):
                          'v_max': float(arg('v')), 'w_max': float(arg('w')),
                          'laps': int(arg('laps')), 'overshoot': float(arg('overshoot')),
                          'idle_after': float(arg('idle_after')), 'scenario': scenario,
-                         'change_after_lap': int(arg('change_after_lap'))}])
+                         'change_after_lap': int(arg('change_after_lap')),
+                         'mover_speed': float(arg('mover_speed')),
+                         'mover_lane': [float(v) for v in arg('mover_lane').split(',')]}])
         actions.append(TimerAction(period=8.0, actions=[driver]))
         actions.append(RegisterEventHandler(OnProcessExit(
             target_action=driver,
@@ -88,6 +96,7 @@ def generate_launch_description():
     args = [
         ('run', 'exp'), ('v', '0.5'), ('w', '1.0'), ('laps', '1'), ('overshoot', '2.0'),
         ('idle_after', '5.0'), ('scenario', 'none'), ('change_after_lap', '1'),
+        ('mover_speed', '0.5'), ('mover_lane', '0.2,2.3,2.2,2.3'),
         ('wheel_collision', 'sphere'), ('driver', 'true'), ('gui', 'true'), ('rviz', 'true'),
         ('bag_dir', '~/ros2_ws/bags/wt052'), ('world', ''),
     ]

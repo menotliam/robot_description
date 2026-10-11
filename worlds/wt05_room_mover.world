@@ -27,6 +27,11 @@
       </camera>
     </gui>
 
+    <!-- [05.2 kich ban C] dich vu /get_entity_state, /set_entity_state -->
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <update_rate>1.0</update_rate>
+    </plugin>
+
     <model name="wall_north">
       <static>true</static>
       <pose>0.0000 3.1000 0.500 0 0 0.0000</pose>
@@ -171,9 +176,11 @@
       </link>
     </model>
     <model name="mover">
-      <static>true</static>
+      <static>false</static>
       <pose>1.2000 2.3000 0.250 0 0 0.0000</pose>
       <link name="link">
+        <kinematic>true</kinematic>
+        <gravity>false</gravity>
         <collision name="collision"><geometry><box><size>0.5000 0.5000 0.500</size></box></geometry></collision>
         <visual name="visual">
           <geometry><box><size>0.5000 0.5000 0.500</size></box></geometry>

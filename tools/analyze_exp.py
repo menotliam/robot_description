@@ -14,11 +14,17 @@ Ba che do, moi che do tra loi mot cau hoi:
             - quang duong odometry ke tu nut cuoi (so voi nguong tao nut)
   dynamic BAG             Vat da duoc quet roi bi lay di / doi cho thi ban do ra sao?
             - so o "tuong" o vi tri cu (bong ma) va vi tri moi theo tung vong chay
+  moving  BAG [BAG ...]   (kich ban C) Vat chay qua lai lien tuc tren mot lan roi bi xoa?
+            - so o "tuong" trong lan theo thoi gian / tung vong, tach mep lan quay ve robot
+            - ty le co mat cua vat tai cac thoi diem tao nut (tu /pose) doc mep lan, so voi
+              nguong cua Karto (o la tuong khi ty le > 1/9)
+            - sai lech SLAM trong luc vat chay va sau khi vat bi xoa
 
 Cach chay (sau khi source ROS 2; khong co rosbag2_py thi dung `pip install rosbags`):
   python3 tools/analyze_exp.py speed ~/ros2_ws/bags/wt052/e1_* -o ~/ros2_ws/bags/wt052/results
   python3 tools/analyze_exp.py idle ~/ros2_ws/bags/wt052/e2_idle -o ...
   python3 tools/analyze_exp.py dynamic ~/ros2_ws/bags/wt052/e3a_remove ~/ros2_ws/bags/wt052/e3b_move -o ...
+  python3 tools/analyze_exp.py moving ~/ros2_ws/bags/wt052/e3c_* -o ...
 """
 
 import argparse
@@ -36,8 +42,8 @@ import wt05_world as W                   # noqa: E402
 import analyze_wt05 as A5                # noqa: E402
 import compare_map as CM                 # noqa: E402
 
-TOPICS = ('/odom', '/ground_truth', '/tf', '/scan', '/map',
-          '/slam_toolbox/graph_visualization', '/exp/event', '/cmd_vel')
+TOPICS = ('/odom', '/ground_truth', '/tf', '/tf_static', '/scan', '/map',
+          '/slam_toolbox/graph_visualization', '/exp/event', '/cmd_vel', '/pose', '/exp/mover')
 SPAWN = W.SPAWN
 LONG_EDGE = 10          # canh noi hai nut cach nhau >= 10 id (~5 m duong di) = canh "xa"
 
@@ -105,6 +111,7 @@ def _yaw(q):
 def load_run(path, backend='auto'):
     """Doc bag MOT luot, gom moi thu can cho ca ba che do."""
     odom, gt, m2o, scans, maps, graphs, events, cmd = [], [], [], [], [], [], [], []
+    poses, mover, tf_static = [], [], {}
     scan_info = None
     for topic, t_ns, msg in iter_bag(path, TOPICS, backend):
         if topic in ('/odom', '/ground_truth'):
@@ -151,6 +158,17 @@ def load_run(path, backend='auto'):
                 pass
         elif topic == '/cmd_vel':
             cmd.append((t_ns * 1e-9, msg.linear.x, msg.angular.z))
+        elif topic == '/pose':           # slam_toolbox: 1 message / nut, dau thoi gian = scan
+            p = msg.pose.pose
+            poses.append((_t(msg.header.stamp), p.position.x, p.position.y, _yaw(p.orientation)))
+        elif topic == '/exp/mover':
+            p = msg.pose
+            mover.append((_t(msg.header.stamp), p.position.x, p.position.y))
+        elif topic == '/tf_static':
+            for tr in msg.transforms:
+                tt = tr.transform
+                tf_static[tr.child_frame_id.lstrip('/')] = (
+                    tr.header.frame_id.lstrip('/'), tt.translation.x, tt.translation.y, _yaw(tt.rotation))
 
     def arr(rows):
         a = np.array(rows, dtype=float)
@@ -162,7 +180,9 @@ def load_run(path, backend='auto'):
     d = dict(odom=arr(odom), gt=arr(gt), m2o=np.array(sorted(m2o), dtype=float),
              scans=np.array(scans, dtype=float) if scans else None, scan_info=scan_info,
              maps=sorted(maps, key=lambda m: m['t']), graphs=sorted(graphs, key=lambda g: g['t']),
-             events=events, cmd=np.array(cmd, dtype=float), name=Path(path).name)
+             events=events, cmd=np.array(cmd, dtype=float), name=Path(path).name,
+             poses=arr(poses) if poses else np.zeros((0, 4)), mover=arr(mover) if mover else np.zeros((0, 3)),
+             tf_static=tf_static)
     for k in ('odom', 'gt'):
         if len(d[k]) < 10:
             raise RuntimeError(f'{path}: thieu du lieu {k}')
@@ -742,16 +762,416 @@ def run_dynamic(paths, outdir, backend):
         print(f'-> {outdir}/{name}_dynamic.png, _dynamic.csv, _dynamic_laps.tex')
 
 
+# ================================================================ MOVING (kich ban C) ==
+
+def lidar_offset(d):
+    """Tu the cua khung /scan trong khung robot (x, y, yaw), doc tu /tf_static."""
+    target = (d['scan_info'] or {}).get('frame_id', 'lidar_link').lstrip('/') if d['scan_info'] else 'lidar_link'
+    for base in ('base_footprint', 'base_link'):
+        acc, f = np.zeros(3), target
+        for _ in range(10):
+            if f == base:
+                return acc
+            if f not in d['tf_static']:
+                break
+            par, x, y, yaw = d['tf_static'][f]
+            acc = A5.compose(np.array([x, y, yaw]), acc)
+            f = par
+    print('  [canh bao] khong doc duoc vi tri lidar tu /tf_static -> dung (0,2; 0; 0)')
+    return np.array([0.2, 0.0, 0.0])
+
+
+def node_times(d, r):
+    """Thoi diem cac scan duoc nhan lam nut. Uu tien /pose: slam_toolbox phat dung MOT lan cho moi scan
+    duoc Karto nhan (dau thoi gian = scan do). Bag khong co /pose: lay lan dau nut xuat hien trong
+    graph_visualization, roi chon thoi diem ground truth gan vi tri nut nhat trong ~2 s truoc do."""
+    if len(d['poses']):
+        return d['poses'][:, 0], '/pose'
+    t_abs = r['t'] + r['t0']
+    seen, out, t_prev = set(), [], t_abs[0]
+    for g in d['graphs']:
+        new = sorted(i for i in g['nodes'] if i not in seen)
+        sel = np.flatnonzero((t_abs >= t_prev - 1.0) & (t_abs <= g['t']))
+        for i in new:
+            if len(sel):
+                nx, ny = g['nodes'][i]
+                k = sel[np.argmin(np.hypot(r['P_gt'][sel, 0] - nx, r['P_gt'][sel, 1] - ny))]
+                out.append(t_abs[k])
+        seen.update(new)
+        t_prev = g['t']
+    return np.array(sorted(out)), 'graph_visualization (uoc luong)'
+
+
+def visible(sensors, pts, rmax):
+    """(N,2) vi tri lidar, (K,2) diem (world) -> (N,K) True neu doan thang khong bi vat can tinh che
+    va trong tam do. Vat chay KHONG tinh (diem xet nam ngoai lan, phia robot)."""
+    seg = W.segments()
+    S = sensors[:, None, None, :]
+    P = pts[None, :, None, :]
+    A, B = seg[None, None, :, 0:2], seg[None, None, :, 2:4]
+    dd, e, w = P - S, B - A, A - S
+    den = dd[..., 0] * e[..., 1] - dd[..., 1] * e[..., 0]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        t = (w[..., 0] * e[..., 1] - w[..., 1] * e[..., 0]) / den
+        u = (w[..., 0] * dd[..., 1] - w[..., 1] * dd[..., 0]) / den
+    blocked = ((np.abs(den) > 1e-12) & (t > 1e-6) & (t < 1 - 1e-6) & (u >= 0) & (u <= 1)).any(-1)
+    S2, D2 = sensors[:, None, :], pts[None, :, :] - sensors[:, None, :]
+    for cx, cy, rad in W.circles():
+        tc = np.clip(((cx - S2[..., 0]) * D2[..., 0] + (cy - S2[..., 1]) * D2[..., 1])
+                     / np.maximum((D2 ** 2).sum(-1), 1e-12), 0, 1)
+        blocked |= np.hypot(S2[..., 0] + tc * D2[..., 0] - cx, S2[..., 1] + tc * D2[..., 1] - cy) < rad
+    return ~blocked & (np.hypot(D2[..., 0], D2[..., 1]) <= rmax)
+
+
+def lane_geometry(ev):
+    A = np.array([ev['ax'], ev['ay']], float)
+    B = np.array([ev['bx'], ev['by']], float)
+    L = float(np.hypot(*(B - A)))
+    e = (B - A) / L
+    n = np.array([-e[1], e[0]])
+    centroid = np.array(W.ROUTE[:-1], float).mean(axis=0)
+    sigma = 1.0 if (centroid - A) @ n > 0 else -1.0       # mep lan quay ve phia duong chay
+    return dict(A=A, B=B, L=L, e=e, n=n, sigma=sigma, half=float(ev.get('size', W.MOVER['size'])) / 2)
+
+
+def _raw_centers(m):
+    h, w = m['data'].shape
+    res = m['res']
+    jj, ii = np.meshgrid(np.arange(w), np.arange(h))
+    xl, yl = (jj + 0.5) * res, (ii + 0.5) * res
+    c, s = math.cos(m['oyaw']), math.sin(m['oyaw'])
+    return np.stack([m['ox'] + c * xl - s * yl, m['oy'] + s * xl + c * yl], axis=-1).reshape(-1, 2)
+
+
+class LaneCells:
+    """Phan loai o trong lan (frame map) cho tung hinh hoc ban do (cache theo kich thuoc/goc).
+    Vung lan = vet quet cua hop vuong truc chay doc lan (dung cho lan song song truc x hoac y)."""
+
+    def __init__(self, lg, band):
+        self.lg, self.band, self.cache = lg, band, {}
+
+    def get(self, m):
+        key = (m['data'].shape, round(m['ox'], 6), round(m['oy'], 6), m['res'])
+        if key not in self.cache:
+            lg, b = self.lg, self.band
+            cw = W.frame_to_world(_raw_centers(m), SPAWN)
+            rel = cw - lg['A']
+            u, w = rel @ lg['e'], rel @ lg['n']
+            h = lg['half']
+            region = (u >= -h - b) & (u <= lg['L'] + h + b) & (np.abs(w) <= h + b)
+            idx = np.flatnonzero(region)
+            stat = np.zeros(len(cw), bool)
+            stat[idx] = W.dist_to_surface(cw[idx]) <= b        # sat vat can tinh -> loai
+            region &= ~stat
+            near = region & (np.abs(w - lg['sigma'] * h) <= b)
+            far = region & (np.abs(w + lg['sigma'] * h) <= b)
+            self.cache[key] = dict(region=region, near=near, far=far, u=u)
+        return self.cache[key]
+
+    def counts(self, m):
+        c = self.get(m)
+        occ = m['data'].ravel() >= 65
+        free = (m['data'].ravel() >= 0) & (m['data'].ravel() <= 25)
+        tot = int((occ & c['region']).sum())
+        near = int((occ & c['near']).sum())
+        far = int((occ & c['far']).sum())
+        return dict(total=tot, near=near, far=far, other=tot - near - far,
+                    free=int((free & c['region']).sum()))
+
+
+def run_moving(paths, outdir, backend):
+    plt = _plt()
+    from matplotlib.colors import ListedColormap
+    cmap = ListedColormap(['#111111', '#bdbdbd', '#ffffff'])
+    summary = []
+    for path in paths:
+        d = load_run(path, backend)
+        name = d['name']
+        ev = d['events']
+        ms = next((e for e in ev if e.get('event') == 'move_start'), None)
+        if ms is None:
+            print(f'{name}: khong co su kien move_start (khong phai kich ban C) -> bo qua')
+            continue
+        r = pose_eval(d)
+        t0 = r['t0']
+        stop = next((e for e in ev if e.get('event') == 'move_stop'), None)
+        rem = next((e for e in ev if e.get('event') == 'remove'), None)
+        laps = [(e['lap'], e['t']) for e in ev if e.get('event') == 'lap']
+        stop_lap = ms.get('stop_after_lap')
+        t_stop = stop['t'] if stop else (rem['t'] if rem else np.inf)
+        t_rm = rem['t'] if rem else np.inf
+        lg = lane_geometry(ms)
+        res = d['maps'][0]['res']
+        band = 1.5 * res
+        cells = LaneCells(lg, band)
+        h, L = lg['half'], lg['L']
+
+        # ---- vi tri vat theo thoi gian (world)
+        mv = d['mover']
+
+        def mover_xy(t):
+            if t >= t_rm:
+                return None
+            if len(mv):
+                k = int(np.searchsorted(mv[:, 0], t, side='right')) - 1
+                return tuple(mv[max(k, 0), 1:3])
+            s = ms.get('s0', L / 2) + ms['speed'] * max(0.0, min(t, t_stop) - ms['t'])
+            s = s % (2 * L)
+            s = s if s <= L else 2 * L - s
+            return tuple(lg['A'] + lg['e'] * s)
+
+        # ---- so o trong lan theo thoi gian
+        rows = []
+        for mp in d['maps']:
+            rows.append(dict(t=mp['t'] - t0, **cells.counts(mp)))
+        T = np.array([x['t'] for x in rows])
+        tot = np.array([x['total'] for x in rows])
+        near = np.array([x['near'] for x in rows])
+        other = np.array([x['other'] + x['far'] for x in rows])
+
+        def at(tq):
+            return rows[min(len(rows) - 1, int(np.searchsorted(T, tq)))]
+
+        lap_rows = []
+        for lap, tl in laps:
+            x = {k: v for k, v in at(tl - t0 + 1.5).items() if k != 't'}
+            lap_rows.append(dict(lap=lap, t=float(tl - t0), moving=bool(tl < t_stop - 1e-3), **x))
+        k_before = max(0, int(np.searchsorted(T, t_stop - t0)) - 1)
+        before = rows[k_before]
+        moving_laps = [lr for lr in lap_rows if lr['moving']]
+        steady = float(np.mean([lr['total'] for lr in moving_laps])) if moving_laps else float('nan')
+        peak = int(tot[T < t_stop - t0].max()) if (T < t_stop - t0).any() else 0
+        thr = max(2, int(round(0.05 * peak)))
+        cleared = None
+        if stop_lap is not None:
+            cleared = next((lr['lap'] - stop_lap for lr in lap_rows
+                            if lr['t'] > t_stop - t0 and lr['total'] <= thr), None)
+
+        # ---- ty le co mat cua vat tai cac thoi diem tao nut, doc mep lan quay ve robot
+        tn, tsrc = node_times(d, r)
+        seln = (tn >= ms['t']) & (tn < t_stop)
+        tn_m = tn[seln]
+        gtw = d['gt']
+        Pn = A5.interp_pose(gtw[:, 0], gtw[:, 1:4], tn_m)
+        off = lidar_offset(d)
+        Sxy = A5.compose(Pn, off[None, :])[:, :2] if len(Pn) else np.zeros((0, 2))
+        rmax = (d['scan_info'] or {}).get('range_max', 12.0) if d['scan_info'] else 12.0
+        uk = np.arange(-h + res / 2, L + h, res)
+        pts = lg['A'] + uk[:, None] * lg['e'] + (lg['sigma'] * (h + 0.6 * res)) * lg['n']
+        vis = visible(Sxy, pts, rmax) if len(Sxy) else np.zeros((0, len(uk)), bool)
+        mov = np.array([mover_xy(t) for t in tn_m], float).reshape(-1, 2)
+        u_obj = (mov - lg['A']) @ lg['e']
+        cov = np.abs(u_obj[:, None] - uk[None, :]) < h
+        n_vis = vis.sum(0)
+        f = np.where(n_vis > 0, (vis & cov).sum(0) / np.maximum(n_vis, 1), np.nan)
+        m_end = map_at(d['maps'], t_stop - 0.05) if np.isfinite(t_stop) else d['maps'][-1]
+        if m_end['t'] >= t_stop:            # ban /map cuoi cung TRUOC khi dung
+            prev = [mp for mp in d['maps'] if mp['t'] < t_stop]
+            m_end = prev[-1] if prev else m_end
+        ce = cells.get(m_end)
+        occ_e = (m_end['data'].ravel() >= 65) & ce['near']
+        obs = np.array([bool((occ_e & (np.abs(ce['u'] - u) <= res / 2 + 1e-9)).any()) for u in uk])
+        pred = f > 1.0 / 9.0
+        ok = n_vis >= 5
+        agree = float((pred[ok] == obs[ok]).mean()) if ok.any() else float('nan')
+        n_seen = int(vis.any(axis=1).sum()) if len(vis) else 0
+
+        # ---- SLAM trong luc vat chay / sau khi xoa
+        tt = r['t'] + t0
+        ph = r['phase']
+        i1 = ph[1] if ph else len(tt) - 1
+        e = r['e_slam']
+        m1 = (tt >= ms['t']) & (tt < t_stop) & np.isfinite(e)
+        m2 = (tt >= t_stop) & (np.arange(len(tt)) <= i1) & np.isfinite(e)
+
+        def rms(x):
+            return float(np.sqrt(np.mean(x ** 2)) * 100) if len(x) else float('nan')
+
+        summ = dict(name=name, speed=float(ms['speed']), lane_len=L, stop_lap=stop_lap,
+                    laps=len(laps), nodes_moving=int(len(tn_m)), nodes_seeing_lane=n_seen,
+                    node_src=tsrc, steady=steady, peak=peak, before=before['total'],
+                    before_near=before['near'], cleared_after=cleared, clear_thr=thr,
+                    face_cols=int(len(uk)), face_occ_end=int(obs.sum()), face_pred=int(pred.sum()),
+                    agree=agree, f_median=float(np.nanmedian(f)) if np.isfinite(f).any() else float('nan'),
+                    slam_rms_moving=rms(e[m1]), slam_max_moving=float(np.max(e[m1]) * 100) if m1.any() else float('nan'),
+                    slam_rms_after=rms(e[m2]), slam_max_after=float(np.max(e[m2]) * 100) if m2.any() else float('nan'),
+                    tp_sent=stop.get('sent') if stop else None, tp_failed=stop.get('failed') if stop else None,
+                    final_total=int(tot[-1]))
+        summary.append(dict(s=summ, T=T, tot=tot, t_stop=t_stop - t0, lap_rows=lap_rows,
+                            lap_t=np.array([tl - t0 for _, tl in laps])))
+
+        # ---- file
+        with open(outdir / f'{name}_moving.csv', 'w', newline='') as fh:
+            wr = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            wr.writeheader()
+            wr.writerows(rows)
+        with open(outdir / f'{name}_moving_presence.csv', 'w', newline='') as fh:
+            wr = csv.writer(fh)
+            wr.writerow(['u_m', 'n_nodes_visible', 'presence_f', 'karto_ratio_f_over_1pf', 'pred_occ', 'map_occ'])
+            for i in range(len(uk)):
+                fi = f[i]
+                wr.writerow([round(float(uk[i]), 3), int(n_vis[i]), '' if not np.isfinite(fi) else round(float(fi), 4),
+                             '' if not np.isfinite(fi) else round(float(fi / (1 + fi)), 4), int(pred[i]), int(obs[i])])
+        hdr = ['Vòng', 'Vật', 'Ô tường trong làn', 'mép phía robot', 'chỗ khác', 'ô trống trong làn']
+        tl_rows = [[str(lr['lap']), 'chạy' if lr['moving'] else 'đã xóa', str(lr['total']), str(lr['near']),
+                    str(lr['other'] + lr['far']), str(lr['free'])] for lr in lap_rows]
+        write_table(outdir / f'{name}_moving_laps.tex', hdr, tl_rows)
+
+        # ---- hinh
+        snaps = []
+        if lap_rows:
+            snaps.append(('hết vòng 1', lap_rows[0]['t'] + 1.5))
+        if np.isfinite(t_stop):
+            snaps.append((f'trước khi xóa (vòng {stop_lap})', t_stop - t0 - 0.05))
+            after = [lr for lr in lap_rows if lr['t'] > t_stop - t0]
+            for k in (1, 3):
+                if len(after) > k - 1 and after[k - 1] is not after[-1]:
+                    snaps.append((f'+{after[k - 1]["lap"] - stop_lap} vòng sau khi xóa', after[k - 1]['t'] + 1.5))
+        snaps.append(('cuối', None))
+        fig = plt.figure(figsize=(15, 9.2))
+        gsp = fig.add_gridspec(3, len(snaps), height_ratios=[0.62, 1.2, 0.75], hspace=0.42, wspace=0.08)
+        Am = W.world_to_frame(lg['A'][None], SPAWN)[0]
+        Bm = W.world_to_frame(lg['B'][None], SPAWN)[0]
+        corners = W.world_to_frame(np.array([
+            lg['A'] - h * lg['e'] - h * lg['n'], lg['B'] + h * lg['e'] - h * lg['n'],
+            lg['B'] + h * lg['e'] + h * lg['n'], lg['A'] - h * lg['e'] + h * lg['n'],
+            lg['A'] - h * lg['e'] - h * lg['n']]), SPAWN)
+        outl = [W.world_to_frame(pl, SPAWN) for pl in W.outline_polylines()]
+        lo, hi = np.minimum(Am, Bm) - h - 0.45, np.maximum(Am, Bm) + h + 0.45
+        for j, (lab, tq) in enumerate(snaps):
+            ax = fig.add_subplot(gsp[0, j])
+            mp = d['maps'][-1] if tq is None else map_at(d['maps'], tq + t0)
+            g = grid_dict(mp)
+            hh, ww = g['grid'].shape
+            ax.imshow(np.where(g['grid'] == 100, 0, np.where(g['grid'] == 0, 2, 1)), cmap=cmap, vmin=0, vmax=2,
+                      extent=(mp['ox'], mp['ox'] + ww * mp['res'], mp['oy'], mp['oy'] + hh * mp['res']),
+                      origin='upper', interpolation='nearest')
+            for q in outl:
+                ax.plot(q[:, 0], q[:, 1], color='#e8501c', lw=0.6, alpha=0.7)
+            ax.plot(corners[:, 0], corners[:, 1], color='#8e44ad', lw=1.1, ls='--')
+            ax.set_xlim(lo[0], hi[0])
+            ax.set_ylim(lo[1], hi[1])
+            ax.set_aspect('equal')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            c = cells.counts(mp)
+            ax.set_title(f'{lab}\n{c["total"]} ô tường ({c["near"]} ở mép)', fontsize=9)
+        ax = fig.add_subplot(gsp[1, :len(snaps) // 2 + 1])
+        if np.isfinite(t_stop):
+            ax.axvspan(ms['t'] - t0, t_stop - t0, color='#8e44ad', alpha=0.08, lw=0)
+            ax.axvline(t_rm - t0, color='k', lw=1.2)
+            ax.text(t_rm - t0, 0.97, ' xóa vật', transform=ax.get_xaxis_transform(), va='top', fontsize=9)
+        ax.plot(T, tot, color='#8e44ad', label='ô tường trong làn (tổng)')
+        ax.plot(T, near, color='#1a9e5c', lw=1, label='… ở mép làn quay về robot')
+        ax.plot(T, other, color='#e8901c', lw=1, label='… ở chỗ khác trong làn')
+        for lap, tl in laps:
+            ax.axvline(tl - t0, color='0.6', ls='--', lw=0.7)
+            ax.text(tl - t0, 0.0, f' {lap}', fontsize=7, color='0.4', va='bottom',
+                    transform=ax.get_xaxis_transform())
+        ax.set_xlabel('thời gian mô phỏng (s); nền tím: vật đang chạy; nét đứt xám: hết vòng')
+        ax.set_ylabel('số ô')
+        ax.set_title('Ô "tường" trong làn của vật theo thời gian', fontsize=10)
+        ax.legend(fontsize=8, loc='upper right')
+        ax.grid(alpha=0.25)
+        ax = fig.add_subplot(gsp[1, len(snaps) // 2 + 1:])
+        ax.bar(uk, np.nan_to_num(f), width=res * 0.9, color=np.where(pred, '#8e44ad', '#c9b3d9'))
+        ax.axhline(1 / 9, color='k', ls='--', lw=1)
+        ax.text(uk[0], 1 / 9, ' 1/9 (ngưỡng Karto)', va='bottom', fontsize=8)
+        ax.plot(uk[obs], np.full(obs.sum(), -0.03), 's', color='#111111', ms=3.5,
+                label='mép là tường trên bản đồ (trước khi xóa)')
+        ax.set_ylim(-0.06, max(0.55, float(np.nanmax(f)) + 0.22) if np.isfinite(f).any() else 0.55)
+        ax.set_xlabel('vị trí dọc làn (m, tính từ đầu A)')
+        ax.set_ylabel('tỷ lệ có mặt f')
+        ax.set_title(f'Tỷ lệ có mặt f của vật tại các nút, dọc mép làn (khớp bản đồ {agree * 100:.0f}% cột)',
+                     fontsize=10)
+        ax.legend(fontsize=8, loc='upper right')
+        ax.grid(alpha=0.25, axis='y')
+        ax = fig.add_subplot(gsp[2, :])
+        ax.plot(r['t'], r['e_slam'] * 100, color='#1a9e5c', lw=0.8, label='SLAM: sai lệch vị trí (cm)')
+        if np.isfinite(t_stop):
+            ax.axvspan(ms['t'] - t0, t_stop - t0, color='#8e44ad', alpha=0.08, lw=0)
+            ax.axvline(t_rm - t0, color='k', lw=1.2)
+        ax.set_xlabel('thời gian mô phỏng (s)')
+        ax.set_ylabel('cm')
+        ax.set_title(f'SLAM: RMS {summ["slam_rms_moving"]:.1f} cm khi vật chạy, {summ["slam_rms_after"]:.1f} cm sau khi xóa',
+                     fontsize=10)
+        ax.grid(alpha=0.25)
+        fig.suptitle(f'{name}: vật chạy qua lại {L:.1f} m, {ms["speed"]:g} m/s, xóa sau vòng {stop_lap}', fontsize=12)
+        fig.savefig(outdir / f'{name}_moving.png', dpi=140, bbox_inches='tight')
+        plt.close(fig)
+
+        print(f'=== {name} (kich ban C) ===')
+        print(f"  vat chay {lg['A'].tolist()} <-> {lg['B'].tolist()} ({L:.2f} m), {ms['speed']} m/s, "
+              f"dung + xoa sau vong {stop_lap} (t={t_stop - t0:.1f} s)"
+              + (f" | doi vat {summ['tp_sent']} lan, that bai {summ['tp_failed']}" if summ['tp_sent'] is not None else ''))
+        print(f"  nut trong luc vat chay: {summ['nodes_moving']} (nguon: {tsrc}), {n_seen} nut thay mep lan")
+        for lr in lap_rows:
+            print(f"  het vong {lr['lap']:2d} ({'chay ' if lr['moving'] else 'da xoa'}, t={lr['t']:6.1f} s): "
+                  f"o tuong trong lan {lr['total']:3d} (mep {lr['near']:3d}, cho khac {lr['other'] + lr['far']:3d}), "
+                  f"o trong {lr['free']:3d}")
+        print(f"  trong luc chay: trung binh het vong {steady:.1f} o, dinh {peak} | truoc khi xoa {before['total']} "
+              f"(mep {before['near']}) | sach (<= {thr} o): "
+              f"{'chua' if cleared is None else f'sau {cleared} vong'}")
+        print(f"  mep lan: {summ['face_occ_end']}/{len(uk)} cot la tuong truoc khi xoa; du doan f > 1/9: "
+              f"{summ['face_pred']} cot; khop {agree * 100:.0f}% | f trung vi {summ['f_median']:.3f}")
+        print(f"  SLAM: RMS {summ['slam_rms_moving']:.2f} cm / max {summ['slam_max_moving']:.2f} cm khi vat chay; "
+              f"{summ['slam_rms_after']:.2f} / {summ['slam_max_after']:.2f} cm sau khi xoa")
+        print(f'-> {outdir}/{name}_moving.png, _moving.csv, _moving_presence.csv, _moving_laps.tex')
+
+    if len(summary) > 1:
+        fig, ax = plt.subplots(figsize=(9, 4))
+        for i, su in enumerate(summary):
+            s, lt = su['s'], su['lap_t']
+            if not np.isfinite(su['t_stop']) or len(lt) < 2:
+                continue
+            per = float(np.median(np.diff(lt)))
+            x = (su['T'] - su['t_stop']) / per
+            ax.plot(x, su['tot'], label=f"{s['name']} (chạy {s['stop_lap']} vòng, {s['speed']:g} m/s)")
+        ax.axvline(0, color='k', lw=1.2)
+        ax.set_xlabel('số vòng kể từ khi xóa vật (âm: vật đang chạy)')
+        ax.set_ylabel('ô tường trong làn')
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8)
+        fig.savefig(outdir / 'moving_summary.png', dpi=140, bbox_inches='tight')
+        plt.close(fig)
+    if summary:
+        hdr = ['Chỉ số'] + [su['s']['name'].replace('_', r'\_') for su in summary]
+        S_ = [su['s'] for su in summary]
+        rows = [
+            ['Tốc độ vật (m/s)'] + [fmt(s['speed'], 2) for s in S_],
+            ['Số vòng vật chạy'] + [str(s['stop_lap']) for s in S_],
+            ['Ô tường trong làn, TB hết vòng (khi chạy)'] + [fmt(s['steady'], 0) for s in S_],
+            ['… ngay trước khi xóa (ở mép)'] + [f"{s['before']} ({s['before_near']})" for s in S_],
+            ['Cột mép là tường / dự đoán $f>1/9$'] + [f"{s['face_occ_end']} / {s['face_pred']}" for s in S_],
+            ['Số vòng để sạch sau khi xóa'] + ['--' if s['cleared_after'] is None else str(s['cleared_after'])
+                                               for s in S_],
+            ['SLAM RMS / max khi vật chạy (cm)'] + [f"{fmt(s['slam_rms_moving'])} / {fmt(s['slam_max_moving'])}"
+                                                    for s in S_],
+        ]
+        write_table(outdir / 'moving_summary.tex', hdr, rows)
+        with open(outdir / 'moving_summary.csv', 'w', newline='') as fh:
+            wr = csv.writer(fh)
+            for s in S_:
+                for k, v in s.items():
+                    wr.writerow([s['name'], k, v])
+        print(f'-> {outdir}/moving_summary.tex/.csv' + (', moving_summary.png' if len(summary) > 1 else ''))
+
+
 # ================================================================ main ==
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('mode', choices=['speed', 'idle', 'dynamic'])
+    ap.add_argument('mode', choices=['speed', 'idle', 'dynamic', 'moving'])
     ap.add_argument('bags', nargs='+')
     ap.add_argument('-o', '--out', default='.')
     ap.add_argument('--labels', nargs='*', help='ten hien thi cho tung bag (che do speed)')
     ap.add_argument('--reader', choices=['auto', 'rosbag2_py', 'rosbags'], default='auto')
     a = ap.parse_args()
+    bags = [b for b in a.bags if Path(b).expanduser().is_dir()]
+    for b in a.bags:
+        if b not in bags:
+            print(f'bo qua {b}: khong phai thu muc bag (vd. file _slam_params.yaml)')
+    a.bags = bags
     out = Path(a.out).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     if a.mode == 'speed':
@@ -759,8 +1179,10 @@ def main():
     elif a.mode == 'idle':
         for b in a.bags:
             run_idle(b, out, a.reader)
-    else:
+    elif a.mode == 'dynamic':
         run_dynamic(a.bags, out, a.reader)
+    else:
+        run_moving(a.bags, out, a.reader)
 
 
 if __name__ == '__main__':

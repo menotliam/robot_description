@@ -196,7 +196,9 @@ def outline_polylines():
 
 # ------------------------------------------------------------ sinh SDF --
 
-def _model_sdf(name, kind, p, h, mat):
+def _model_sdf(name, kind, p, h, mat, kinematic=False):
+    """kinematic=True: model KHONG static, link kinematic (khong chiu luc/trong luc) -> doi vi tri
+    bang /set_entity_state thi ca hinh va va cham (cai LiDAR nhin thay) deu di theo."""
     if kind == 'box':
         cx, cy, sx, sy, yaw = p
         geom = f'<box><size>{sx:.4f} {sy:.4f} {h:.3f}</size></box>'
@@ -205,10 +207,12 @@ def _model_sdf(name, kind, p, h, mat):
         cx, cy, r = p
         geom = f'<cylinder><radius>{r:.4f}</radius><length>{h:.3f}</length></cylinder>'
         pose = f'{cx:.4f} {cy:.4f} {h / 2:.3f} 0 0 0'
+    static = 'false' if kinematic else 'true'
+    kin = '\n        <kinematic>true</kinematic>\n        <gravity>false</gravity>' if kinematic else ''
     return f'''    <model name="{name}">
-      <static>true</static>
+      <static>{static}</static>
       <pose>{pose}</pose>
-      <link name="link">
+      <link name="link">{kin}
         <collision name="collision"><geometry>{geom}</geometry></collision>
         <visual name="visual">
           <geometry>{geom}</geometry>
@@ -227,9 +231,20 @@ def mover_shape(at='P1'):
     return (m['name'], 'box', (x, y, m['size'], m['size'], 0.0), m['height'], m['material'])
 
 
+# Plugin cung cap dich vu /set_entity_state (route_driver doi vi tri vat o kich ban C). update_rate: tan so
+# phat /model_states, /link_states (mac dinh 100 Hz) -> 1 Hz cho nhe.
+STATE_PLUGIN = '''    <!-- [05.2 kich ban C] dich vu /get_entity_state, /set_entity_state -->
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <update_rate>1.0</update_rate>
+    </plugin>
+
+'''
+
+
 def world_sdf(with_mover=False):
-    shapes = list(SHAPES) + ([mover_shape('P1')] if with_mover else [])
-    models = ''.join(_model_sdf(*s) for s in shapes)
+    models = ''.join(_model_sdf(*s) for s in SHAPES)
+    if with_mover:
+        models += _model_sdf(*mover_shape('P1'), kinematic=True)
     return f'''<?xml version="1.0"?>
 <!-- SINH TU DONG boi tools/wt05_world.py - sua SHAPES trong script roi chay lai, khong sua tay. -->
 <sdf version="1.6">
@@ -259,7 +274,7 @@ def world_sdf(with_mover=False):
       </camera>
     </gui>
 
-{models}  </world>
+{STATE_PLUGIN if with_mover else ''}{models}  </world>
 </sdf>
 '''
 
@@ -270,7 +285,7 @@ def main():
     (wdir / 'wt05_room.world').write_text(world_sdf())
     (wdir / 'wt05_room_mover.world').write_text(world_sdf(with_mover=True))
     print(f'Da ghi {wdir}/wt05_room.world ({len(SHAPES)} vat the) va '
-          f'wt05_room_mover.world (+ mover tai P1 {MOVER["P1"]})')
+          f'wt05_room_mover.world (+ mover kinematic tai P1 {MOVER["P1"]}, plugin gazebo_ros_state)')
 
 
 if __name__ == '__main__':
